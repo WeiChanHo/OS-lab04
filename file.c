@@ -21,7 +21,11 @@ static ssize_t osfs_read(struct file *filp, char __user *buf, size_t len, loff_t
     struct osfs_inode *osfs_inode = inode->i_private;
     struct osfs_sb_info *sb_info = inode->i_sb->s_fs_info;
     void *data_block;
-    ssize_t bytes_read;
+    ssize_t bytes_read = 0;
+    uint32_t logical_block;
+    uint32_t phys_block;
+    uint32_t offset_in_block;
+    size_t to_read;
 
     // If the file has not been allocated a data block, it indicates the file is empty
     if (osfs_inode->i_blocks == 0)
@@ -33,12 +37,37 @@ static ssize_t osfs_read(struct file *filp, char __user *buf, size_t len, loff_t
     if (*ppos + len > osfs_inode->i_size)
         len = osfs_inode->i_size - *ppos;
 
-    data_block = sb_info->data_blocks + osfs_inode->i_block * BLOCK_SIZE + *ppos;
-    if (copy_to_user(buf, data_block, len))
-        return -EFAULT;
+    while (len > 0) {
+        logical_block = *ppos / sb_info->block_size;
+        offset_in_block = *ppos % sb_info->block_size;
+        to_read = sb_info->block_size - offset_in_block;
+        if (to_read > len)
+            to_read = len;
 
-    *ppos += len;
-    bytes_read = len;
+        phys_block = 0;
+        if (logical_block < 10) {
+            phys_block = osfs_inode->i_block[logical_block];
+        } else {
+            if (osfs_inode->i_block[10] != 0) {
+                uint32_t *indirect_table = sb_info->data_blocks + osfs_inode->i_block[10] * sb_info->block_size;
+                phys_block = indirect_table[logical_block - 10];
+            }
+        }
+
+        if (phys_block == 0) {
+            if (clear_user(buf, to_read))
+                return -EFAULT;
+        } else {
+            data_block = sb_info->data_blocks + phys_block * sb_info->block_size + offset_in_block;
+            if (copy_to_user(buf, data_block, to_read))
+                return -EFAULT;
+        }
+
+        *ppos += to_read;
+        buf += to_read;
+        len -= to_read;
+        bytes_read += to_read;
+    }
 
     return bytes_read;
 }

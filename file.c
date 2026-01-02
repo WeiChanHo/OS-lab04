@@ -64,39 +64,75 @@ static ssize_t osfs_write(struct file *filp, const char __user *buf, size_t len,
     struct osfs_inode *osfs_inode = inode->i_private;
     struct osfs_sb_info *sb_info = inode->i_sb->s_fs_info;
     void *data_block;
-    ssize_t bytes_written;
+    ssize_t bytes_written = 0;
     int ret;
+    uint32_t logical_block;
+    uint32_t phys_block;
+    uint32_t offset_in_block;
+    uint32_t to_write;
 
-    // Step2: Check if a data block has been allocated; if not, allocate one
-    /* 檢查是否已配置資料區塊，若無則配置 */
-    if (osfs_inode->i_blocks == 0) {
-        ret = osfs_alloc_data_block(sb_info, &osfs_inode->i_block);
-        if (ret)
-            return ret;
-        osfs_inode->i_blocks = 1;
-        inode->i_blocks = 1;
-    }
+    while (len > 0) {
+        logical_block = *ppos / sb_info->block_size;
+        offset_in_block = *ppos % sb_info->block_size;
+        to_write = sb_info->block_size - offset_in_block;
+        if (to_write > len)
+            to_write = len;
 
-    // Step3: Limit the write length to fit within one data block
-    /* 限制寫入長度，確保不超過單一區塊大小 */
-    if (*ppos >= sb_info->block_size)
-        return -EFBIG;
+        phys_block = 0;
 
-    if (*ppos + len > sb_info->block_size)
-        len = sb_info->block_size - *ppos;
+        if (logical_block < 10) {
+            // Direct Pointer
+            if (osfs_inode->i_block[logical_block] == 0) {
+                ret = osfs_alloc_data_block(sb_info, &osfs_inode->i_block[logical_block]);
+                if (ret) return ret;
+                osfs_inode->i_blocks++;
+                inode->i_blocks++;
+            }
+            phys_block = osfs_inode->i_block[logical_block];
+        } else {
+            // Indirect Pointer
+            /* 處理 Indirect Pointer (索引 > 9) */
+            
+            // 1. 檢查是否已配置 Indirect Block (i_block[10])
+            if (osfs_inode->i_block[10] == 0) {
+                ret = osfs_alloc_data_block(sb_info, &osfs_inode->i_block[10]);
+                if (ret) return ret;
+                
+                // 初始化 Indirect Block 為 0
+                memset(sb_info->data_blocks + osfs_inode->i_block[10] * sb_info->block_size, 0, sb_info->block_size);
+                
+                osfs_inode->i_blocks++;
+                inode->i_blocks++;
+            }
 
-    // Step4: Write data from user space to the data block
-    /* 將資料從使用者空間複製到資料區塊 */
-    data_block = sb_info->data_blocks + osfs_inode->i_block * sb_info->block_size + *ppos;
-    if (copy_from_user(data_block, buf, len))
-        return -EFAULT;
+            // 2. 讀取 Indirect Block 表格
+            uint32_t *indirect_table = (uint32_t *)(sb_info->data_blocks + osfs_inode->i_block[10] * sb_info->block_size);
+            uint32_t indirect_index = logical_block - 10;
 
-    // Step5: Update inode & osfs_inode attribute
-    /* 更新 Inode 與 osfs_inode 屬性 */
-    *ppos += len;
-    if (*ppos > osfs_inode->i_size) {
-        osfs_inode->i_size = *ppos;
-        inode->i_size = *ppos;
+            // 3. 檢查目標資料塊是否已配置
+            if (indirect_table[indirect_index] == 0) {
+                ret = osfs_alloc_data_block(sb_info, &indirect_table[indirect_index]);
+                if (ret) return ret;
+                osfs_inode->i_blocks++;
+                inode->i_blocks++;
+            }
+            phys_block = indirect_table[indirect_index];
+        }
+
+        // Write data
+        data_block = sb_info->data_blocks + phys_block * sb_info->block_size + offset_in_block;
+        if (copy_from_user(data_block, buf, to_write))
+            return -EFAULT;
+
+        *ppos += to_write;
+        buf += to_write;
+        len -= to_write;
+        bytes_written += to_write;
+
+        if (*ppos > osfs_inode->i_size) {
+            osfs_inode->i_size = *ppos;
+            inode->i_size = *ppos;
+        }
     }
 
     osfs_inode->__i_mtime = osfs_inode->__i_ctime = current_time(inode);
@@ -104,9 +140,6 @@ static ssize_t osfs_write(struct file *filp, const char __user *buf, size_t len,
     inode_set_ctime_to_ts(inode, osfs_inode->__i_ctime);
     mark_inode_dirty(inode);
 
-    // Step6: Return the number of bytes written
-    bytes_written = len;
-    
     return bytes_written;
 }
 

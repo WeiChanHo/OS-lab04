@@ -1,0 +1,7 @@
+echo "*.ko
+*.o
+*.mod.c
+*.order
+*.symvers
+.tmp_versions/
+mnt/" > .gitignore

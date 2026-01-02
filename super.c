@@ -110,6 +110,13 @@ int osfs_fill_super(struct super_block *sb, void *data, int silent)
     root_osfs_inode->__i_atime = root_osfs_inode->__i_mtime = root_osfs_inode->__i_ctime = current_time(root_inode);
     root_inode->i_private = root_osfs_inode;
 
+    if (osfs_alloc_data_block(sb_info, &root_osfs_inode->i_block[0])) {
+        iput(root_inode);
+        vfree(memory_region);
+        return -ENOSPC;
+    }
+    root_osfs_inode->i_blocks = 1;
+
     // Mark root directory inode as used
     set_bit(ROOT_INODE, sb_info->inode_bitmap);
 
